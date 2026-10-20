@@ -41,7 +41,6 @@ import {
   getViewPosition,
   int,
   ivec2,
-  mat2,
   max,
   min,
   mix,
@@ -146,6 +145,32 @@ const getNormalFromDepthWithResolution = /* @__PURE__ */ Fn(
       );
 
     return normalize(cross(dpdx, dpdy));
+  },
+);
+
+const TAU = Math.PI * 2;
+
+const IGN_MULTIPLIER = 52.9829189;
+const IGN_TIME_SCROLL = 5.588238;
+const IGN_DOT_SCALE = vec2(0.06711056, 0.00583715);
+
+const IGN_OFFSET_1 = vec2(19.19, 47.77);
+
+const ign1 = /* @__PURE__ */ Fn(([pixelPosition, frameWrapped]: any[]) => {
+  const scroll = vec2(float(IGN_TIME_SCROLL).mul(frameWrapped));
+  const p = pixelPosition.add(scroll);
+
+  return float(IGN_MULTIPLIER)
+    .mul(p.dot(IGN_DOT_SCALE).fract())
+    .fract();
+});
+
+const ign2 = /* @__PURE__ */ Fn(
+  ([pixelPosition, frameWrapped]: any[]) => {
+    return vec2(
+      ign1(pixelPosition, frameWrapped),
+      ign1(pixelPosition.add(IGN_OFFSET_1), frameWrapped),
+    );
   },
 );
 
@@ -284,8 +309,6 @@ export class N8AONode extends TempNode {
 
   private readonly quadMesh = new QuadMesh();
 
-  private readonly blueNoiseTexture = new DataTexture(bluenoiseBits, 128, 128);
-
   private readonly outputTarget = new RenderTarget(1, 1, {
     depthBuffer: false,
     format: RGBAFormat,
@@ -416,10 +439,6 @@ export class N8AONode extends TempNode {
 
   private readonly halfResNode = uniform(false);
 
-  private readonly blueNoiseNode = texture(
-    this.blueNoiseTexture,
-  ) as TextureNodeLike;
-
   private readonly aoSourceTextureNode = texture(
     this.aoTargetA.texture,
   ) as TextureNodeLike;
@@ -480,6 +499,12 @@ export class N8AONode extends TempNode {
 
   private frame = 0;
 
+  private ignFrame = 0;
+
+  private blueNoiseTexture: DataTexture | null = null;
+
+  private blueNoiseNode: TextureNodeLike | null = null;
+
   private width = 1;
 
   private height = 1;
@@ -505,12 +530,6 @@ export class N8AONode extends TempNode {
     this.scenePassNode = input.scenePassNode ?? null;
     this.scene = input.scene;
 
-    this.blueNoiseTexture.colorSpace = NoColorSpace;
-    this.blueNoiseTexture.wrapS = RepeatWrapping;
-    this.blueNoiseTexture.wrapT = RepeatWrapping;
-    this.blueNoiseTexture.minFilter = NearestFilter;
-    this.blueNoiseTexture.magFilter = NearestFilter;
-    this.blueNoiseTexture.needsUpdate = true;
     this.depthCopySourceTextureNode = texture(
       this.depthTexture,
     ) as TextureNodeLike;
@@ -539,6 +558,9 @@ export class N8AONode extends TempNode {
     this.configuration = new Proxy(baseConfiguration, {
       set: (target, property, value) => {
         const key = property as keyof N8AOConfiguration;
+        if (key === "noiseType" && value !== "blueNoise" && value !== "ign") {
+          throw new TypeError('noiseType must be "blueNoise" or "ign".');
+        }
         const previousValue = target[key];
         target[key] = value as never;
 
@@ -553,7 +575,13 @@ export class N8AONode extends TempNode {
 
         this.firstFrame();
 
-        if (key === "aoSamples") {
+        if (key === "noiseType") {
+          this.configureAOPass();
+          this.configureDenoisePass();
+          if (value === "ign") {
+            this.disposeBlueNoise();
+          }
+        } else if (key === "aoSamples") {
           this.configureAOPass();
         } else if (key === "denoiseSamples") {
           this.configureDenoisePass();
@@ -599,7 +627,6 @@ export class N8AONode extends TempNode {
     this.depthDownsampleTarget?.dispose();
     this.transparencyTargetDepthWriteFalse?.dispose();
     this.transparencyTargetDepthWriteTrue?.dispose();
-    this.blueNoiseTexture.dispose();
     this.placeholderDepthTexture.dispose();
     this.placeholderNormalTexture.dispose();
     this.placeholderTransparentTexture.dispose();
@@ -610,6 +637,29 @@ export class N8AONode extends TempNode {
     this.compositeMaterial.dispose();
     this.depthCopyMaterial.dispose();
     this.downsampleMaterial.dispose();
+    this.disposeBlueNoise();
+  }
+
+  private ensureBlueNoiseNode(): TextureNodeLike {
+    if (this.blueNoiseTexture === null) {
+      const noise = new DataTexture(bluenoiseBits, 128, 128);
+      noise.colorSpace = NoColorSpace;
+      noise.wrapS = RepeatWrapping;
+      noise.wrapT = RepeatWrapping;
+      noise.minFilter = NearestFilter;
+      noise.magFilter = NearestFilter;
+      noise.needsUpdate = true;
+      this.blueNoiseTexture = noise;
+      this.blueNoiseNode = texture(noise);
+    }
+    return this.blueNoiseNode;
+  }
+
+  private disposeBlueNoise(): void {
+    const noise = this.blueNoiseTexture;
+    this.blueNoiseTexture = null;
+    this.blueNoiseNode = null;
+    noise?.dispose();
   }
 
   firstFrame(): void {
@@ -690,7 +740,6 @@ export class N8AONode extends TempNode {
 
     this.camera.updateMatrixWorld();
     this.detectTransparency();
-    this.syncConfigurationUniforms();
 
     if (
       this.configuration.accumulate &&
@@ -699,13 +748,21 @@ export class N8AONode extends TempNode {
       this.lastProjectionMatrix.equals(this.camera.projectionMatrix)
     ) {
       this.frame += 1;
+      this.ignFrame = (this.ignFrame + 1) & 63;
+      this.frameNode.value = this.configuration.noiseType === "ign"
+        ? this.ignFrame
+        : this.frame;
     } else {
       this.frame = 0;
+      this.ignFrame = 0;
+      this.frameNode.value = 0;
       this.needsFrame = false;
       if (this.configuration.accumulate) {
         this.clearAccumulationTargets(renderer);
       }
     }
+
+    this.syncConfigurationUniforms();
 
     this.lastViewMatrix.copy(this.camera.matrixWorldInverse);
     this.lastProjectionMatrix.copy(this.camera.projectionMatrix);
@@ -1061,12 +1118,14 @@ export class N8AONode extends TempNode {
     const biasAdjustment = this.biasAdjustmentNode;
     const aoDepthNode = this.getAoDepthNode();
     const aoDepthTexture = this.getAoDepthTexture();
-    const blueNoiseNode = this.blueNoiseNode;
     const downsampledNormalTextureNode = this.downsampledNormalTextureNode;
     const orthoNode = this.orthoNode;
     const screenSpaceRadiusNode = this.screenSpaceRadiusNode;
     const aoSamples = this.configuration.aoSamples;
     const halfRes = this.configuration.halfRes;
+    const blueNoiseNode = this.configuration.noiseType === "blueNoise"
+      ? this.ensureBlueNoiseNode()
+      : null;
 
     return Fn(() => {
       const uvNode = uv() as any;
@@ -1092,19 +1151,16 @@ export class N8AONode extends TempNode {
               resolution,
             ).toVar();
 
-        const noiseUv = vec2(uvNode.x, uvNode.y.oneMinus())
-          .mul(resolution)
-          .div(128)
-          .toVar();
-        const noise = blueNoiseNode.sample(noiseUv).toVar();
-        const noiseX = noise.x
-          .add(frame.mul(1.618033988749895))
-          .fract()
-          .toVar();
-        const noiseY = noise.y
-          .add(frame.mul(1.324717957244746))
-          .fract()
-          .toVar();
+        const noisePosition = vec2(uvNode.x, uvNode.y.oneMinus()).mul(resolution);
+        const noise = blueNoiseNode !== null
+          ? blueNoiseNode.sample(noisePosition.div(128)).toVar()
+          : ign2(noisePosition.floor(), frame).toVar();
+        const noiseX = (blueNoiseNode !== null
+          ? noise.x.add(frame.mul(1.618033988749895)).fract()
+          : noise.x).toVar();
+        const noiseY = (blueNoiseNode !== null
+          ? noise.y.add(frame.mul(1.324717957244746)).fract()
+          : noise.y).toVar();
 
         const helper = vec3(0, 1, 0).toVar();
         If(dot(helper, normal).greaterThan(0.99), () => {
@@ -1113,7 +1169,7 @@ export class N8AONode extends TempNode {
 
         const tangent = helper.cross(normal).normalize().toVar();
         const bitangent = normal.cross(tangent).toVar();
-        const rotationAngle = noiseX.mul(Math.PI * 2).toVar();
+        const rotationAngle = noiseX.mul(TAU).toVar();
         const rotationSin = rotationAngle.sin().toVar();
         const rotationCos = rotationAngle.cos().toVar();
 
@@ -1266,7 +1322,6 @@ export class N8AONode extends TempNode {
     const projectionMatrixInverse = this.projectionMatrixInverseNode;
     const aoDepthNode = this.getAoDepthNode();
     const aoSourceTextureNode = this.aoSourceTextureNode;
-    const blueNoiseNode = this.blueNoiseNode;
     const blurIndexNode = this.blurIndexNode;
     const screenSpaceRadiusNode = this.screenSpaceRadiusNode;
     const blurWorldRadiusNode = this.blurWorldRadiusNode;
@@ -1274,6 +1329,9 @@ export class N8AONode extends TempNode {
     const blurRadiusNode = this.blurRadiusNode;
     const blurSampleArrayNode = this.blurSampleArrayNode;
     const denoiseSamples = this.configuration.denoiseSamples;
+    const blueNoiseNode = this.configuration.noiseType === "blueNoise"
+      ? this.ensureBlueNoiseNode()
+      : null;
 
     return Fn(() => {
       const uvNode = uv() as any;
@@ -1292,26 +1350,26 @@ export class N8AONode extends TempNode {
           projectionMatrixInverse,
         ).toVar();
         const texelSize = vec2(1).div(resolution).toVar();
-        const blueNoiseUv = vec2(uvNode.x, uvNode.y.oneMinus())
-          .mul(resolution)
-          .div(128)
-          .toVar();
-        const noise = blueNoiseNode.sample(blueNoiseUv).toVar();
+        const noisePosition = vec2(uvNode.x, uvNode.y.oneMinus()).mul(resolution);
+        const blurPixelPosition = noisePosition.floor().add(
+          vec2(
+            blurIndexNode.mul(17.0),
+            blurIndexNode.mul(43.0),
+          ),
+        ).toVar();
 
-        const angle = blurIndexNode
-          .equal(0)
-          .select(
-            noise.w.mul(Math.PI * 2),
-            blurIndexNode
-              .equal(1)
-              .select(
-                noise.z.mul(Math.PI * 2),
-                blurIndexNode
-                  .equal(2)
-                  .select(noise.y.mul(Math.PI * 2), noise.x.mul(Math.PI * 2)),
+        const noise = blueNoiseNode !== null
+          ? blueNoiseNode.sample(noisePosition.div(128)).toVar()
+          : ign1(blurPixelPosition, float(0)).toVar();
+        const angle = (blueNoiseNode !== null
+          ? blurIndexNode.equal(0).select(
+              noise.w.mul(TAU),
+              blurIndexNode.equal(1).select(
+                noise.z.mul(TAU),
+                blurIndexNode.equal(2).select(noise.y.mul(TAU), noise.x.mul(TAU)),
               ),
-          )
-          .toVar();
+            )
+          : noise.mul(TAU)).toVar();
         const rotationSin = angle.sin().toVar();
         const rotationCos = angle.cos().toVar();
 
@@ -1761,7 +1819,6 @@ export class N8AONode extends TempNode {
         ? this.configuration.aoRadius * 0.5
         : this.configuration.aoRadius;
     this.distanceFalloffNode.value = this.configuration.distanceFalloff;
-    this.frameNode.value = this.frame;
     this.screenSpaceRadiusNode.value = this.configuration.screenSpaceRadius;
     this.blurRadiusNode.value =
       this.configuration.denoiseRadius * (this.configuration.halfRes ? 0.5 : 1);

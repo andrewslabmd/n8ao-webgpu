@@ -45,6 +45,7 @@ describe("n8ao webgpu math", () => {
       transparencyAware: false,
       stencil: false,
       accumulate: false,
+      noiseType: "blueNoise",
     });
   });
 
