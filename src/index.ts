@@ -12,6 +12,7 @@ export type {
   N8AOConfiguration,
   N8AODepthType,
   N8AODisplayMode,
+  N8AONoiseType,
   N8AOQualityMode,
 } from "./math.js";
 export { createN8AOScenePass } from "./createN8AOScenePass.js";

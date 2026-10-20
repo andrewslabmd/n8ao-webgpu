@@ -23,7 +23,10 @@ export type N8AODisplayMode =
   | "Split"
   | "Split AO";
 
+export type N8AONoiseType = "blueNoise" | "ign";
+
 export interface N8AOConfiguration {
+  noiseType: N8AONoiseType;
   aoSamples: number;
   aoRadius: number;
   aoTones: number;
@@ -50,6 +53,7 @@ export interface N8AOConfiguration {
 
 export function createDefaultN8AOConfiguration(): N8AOConfiguration {
   return {
+    noiseType: "blueNoise",
     aoSamples: 16,
     aoRadius: 5,
     aoTones: 0,

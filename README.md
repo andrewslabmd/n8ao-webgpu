@@ -72,6 +72,24 @@ That's it. The effect works out of the box with any Three.js WebGPU scene as lon
 
 ## Configuration
 
+### Noise source
+
+Blue noise remains the default, matching upstream N8AO. To opt into
+textureless Interleaved Gradient Noise (IGN):
+
+```ts
+n8ao.configuration.noiseType = "ign"; // default: "blueNoise"
+```
+
+Both modes support half-resolution rendering and temporal accumulation.
+Changing the mode rebuilds the AO and blur shaders and resets temporal history,
+so prefer choosing it at startup rather than switching every frame. Blue-noise
+textures are created only while blue noise is selected and released when
+switching to IGN. Selecting IGN before the first render avoids the blue-noise
+GPU upload. The vendored blue-noise asset remains in the package, so this option
+does not provide the bundle-size reduction of removing the asset entirely.
+Invalid values throw a `TypeError` without changing the current mode.
+
 The four principal parameters that control the look of the AO:
 
 ```ts
